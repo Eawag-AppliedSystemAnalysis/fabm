@@ -6,7 +6,7 @@
 ! vertical index is ordered from bottom to surface
 #define _FABM_VERTICAL_BOTTOM_TO_SURFACE_
 
-! if all arrays passed to FABM are contiguous in memory
+! pass if all arrays passed to FABM are contiguous in memory
 ! #define _FABM_CONTIGUOUS_
 
 #include "fabm.h"

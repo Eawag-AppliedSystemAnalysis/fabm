@@ -13,3 +13,5 @@
 ! #define _FABM_CONTIGUOUS_
 
 #include "fabm.h"
+
+! test

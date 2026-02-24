@@ -211,10 +211,11 @@ contains
    subroutine interior_temporal_mean_set_data(self, store, seconds_per_time_unit)
       class (type_interior_temporal_mean), intent(inout) :: self
       type (type_store), target                          :: store
-      real(rke), intent(in)                              :: seconds_per_time_unit
+      real(rke), optional, intent(in)                    :: seconds_per_time_unit
 
       integer :: ibin
 
+      if (.not. present(seconds_per_time_unit)) call self%fatal_error('interior_temporal_mean_set_data', 'host did not provide time information.')
       self%source%icatalog = self%source%link%target%catalog_index
       self%window = self%window / seconds_per_time_unit
       do ibin = 1, size(self%history)
@@ -239,8 +240,10 @@ contains
       integer :: icurrent, icurrentbin, ioldest
       _DECLARE_LOCATION_
 
+      if (.not. present(time)) call self%fatal_error('interior_temporal_mean_update', 'host did not provide time information.')
+
       value => catalog%interior(self%source%icatalog)%p
-      if (.not. associated(value)) call self%fatal_error('interior_temporal_mean_update', 'source pointer of not associated.')
+      if (.not. associated(value)) call self%fatal_error('interior_temporal_mean_update', 'source pointer not associated.')
 
       ! Note that all array processing below uses explicit loops in order to respect
       ! any limits on the active domain given by the _LOCATION_RANGE_ argument.
@@ -342,10 +345,11 @@ contains
    subroutine horizontal_temporal_mean_set_data(self, store, seconds_per_time_unit)
       class (type_horizontal_temporal_mean), intent(inout) :: self
       type (type_store), target                            :: store
-      real(rke), intent(in)                                :: seconds_per_time_unit
+      real(rke), optional, intent(in)                      :: seconds_per_time_unit
 
       integer :: ibin
 
+      if (.not. present(seconds_per_time_unit)) call self%fatal_error('horizontal_temporal_mean_set_data', 'host did not provide time information.')
       self%source%icatalog = self%source%link%target%catalog_index
       self%window = self%window / seconds_per_time_unit
       do ibin = 1, size(self%history)
@@ -370,11 +374,13 @@ contains
       integer :: icurrent, icurrentbin, ioldest
       _DECLARE_HORIZONTAL_LOCATION_
 
+      if (.not. present(time)) call self%fatal_error('horizontal_temporal_mean_update', 'host did not provide time information.')
+
       value => catalog%horizontal(self%source%icatalog)%p
-      if (.not. associated(value)) call self%fatal_error('interior_temporal_mean_update', 'source pointer of not associated.')
+      if (.not. associated(value)) call self%fatal_error('horizontal_temporal_mean_update', 'source pointer not associated.')
 
       ! Note that all array processing below uses explicit loops in order to respect
-      ! any limits on the active domain given by the _HORIZONTAL_LOCATION_RANGE_ argument.
+      ! any limits on the active domain given by the _LOCATION_RANGE_ argument.
 
       dt_bin = self%window / self%n
 
@@ -473,10 +479,11 @@ contains
    subroutine horizontal_temporal_maximum_set_data(self, store, seconds_per_time_unit)
       class (type_horizontal_temporal_maximum), intent(inout) :: self
       type (type_store), target                               :: store
-      real(rke), intent(in)                                   :: seconds_per_time_unit
+      real(rke), optional, intent(in)                         :: seconds_per_time_unit
 
       integer :: ibin
 
+      if (.not. present(seconds_per_time_unit)) call self%fatal_error('horizontal_temporal_maximum_set_data', 'host did not provide time information.')
       self%source%icatalog = self%source%link%target%catalog_index
       self%window = self%window / seconds_per_time_unit
       do ibin = 1, size(self%history)
@@ -500,11 +507,13 @@ contains
       real(rke) :: w, bin_end_time
       _DECLARE_HORIZONTAL_LOCATION_
 
+      if (.not. present(time)) call self%fatal_error('horizontal_temporal_maximum_update', 'host did not provide time information.')
+
       value => catalog%horizontal(self%source%icatalog)%p
-      if (.not. associated(value)) call self%fatal_error('interior_temporal_mean_update', 'source pointer of not associated.')
+      if (.not. associated(value)) call self%fatal_error('horizontal_temporal_maximum_update', 'source pointer not associated.')
 
       ! Note that all array processing below uses explicit loops in order to respect
-      ! any limits on the active domain given by the _HORIZONTAL_LOCATION_RANGE_ argument.
+      ! any limits on the active domain given by the _LOCATION_RANGE_ argument.
 
       if (self%start_time%p == -huge(self%start_time%p)) self%start_time%p = time
 

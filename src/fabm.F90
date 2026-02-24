@@ -264,8 +264,9 @@ module fabm
       type (type_store)                    :: store
       type (type_schedules)                :: schedules
       type (type_domain)                   :: domain
-      real (rke)                           :: seconds_per_time_unit = 0.0_rke
-      real (rke)                           :: time = 0.0_rke
+      real(rke), private                   :: seconds_per_time_unit = 0.0_rke
+      real(rke), private                   :: time = 0.0_rke
+      logical, private                     :: has_time = .false.
       ! ---------------------------------------------------------------------------------------------------------------------------
       !> @name Memory caches for exchanging information with biogeochemical model instances
       !> @{
@@ -682,7 +683,10 @@ contains
       self%domain%horizontal_shape(:) = (/_HORIZONTAL_LOCATION_/)
 #endif
 
-      if (present(seconds_per_time_unit)) self%seconds_per_time_unit = seconds_per_time_unit
+      if (present(seconds_per_time_unit)) then
+         if (seconds_per_time_unit <= 0.0_rke) call fatal_error('set_domain', 'seconds_per_time_unit must be positive if provided.')
+         self%seconds_per_time_unit = seconds_per_time_unit
+      end if
    end subroutine set_domain
 
 #if _FABM_DIMENSION_COUNT_>0
@@ -904,7 +908,11 @@ contains
       call cache_create(self%domain, self%cache_fill_values, self%cache_hz)
       call cache_create(self%domain, self%cache_fill_values, self%cache_vert)
 
-      call initialize_global(self%root)
+      if (self%seconds_per_time_unit == 0.0_rke) then
+         call initialize_global(self%root)
+      else
+         call initialize_global(self%root, self%seconds_per_time_unit)
+      end if
 
       ! For diagnostics that are not needed, set their write index to 0 (rubbish bin)
       if (self%log) then
@@ -997,20 +1005,21 @@ contains
          end do
       end subroutine
 
-      recursive subroutine initialize_global(model)
+      recursive subroutine initialize_global(model, seconds_per_time_unit)
          class (type_base_model), intent(inout) :: model
+         real(rke), optional, intent(in)        :: seconds_per_time_unit
 
          type (type_model_list_node), pointer :: child
 
          select type (model)
          class is (type_global_model)
-            call model%set_data(self%store, self%seconds_per_time_unit)
+            call model%set_data(self%store, seconds_per_time_unit)
          end select
 
          ! Process children
          child => model%children%first
          do while (associated(child))
-            call initialize_global(child%model)
+            call initialize_global(child%model, seconds_per_time_unit)
             child => child%next
          end do
       end subroutine
@@ -1947,7 +1956,7 @@ contains
             catalog_index = self%interior_state_variables(ivar)%target%catalog_index
             if (self%catalog%interior_sources(catalog_index) == data_source_fabm) then
                read_index = self%check_interior_state_data(ivar)%index
-               _UNPACK_TO_GLOBAL_(self%cache_int%read, read_index, self%catalog%interior(catalog_index)%p, self%cache_int, self%interior_state_variables(ivar)%missing_value)
+               _UNPACK_TO_GLOBAL_SKIPMASK_(self%cache_int%read, read_index, self%catalog%interior(catalog_index)%p, self%cache_int)
             end if
          end do
       end if
@@ -2085,7 +2094,7 @@ contains
             catalog_index = state_variables(ivar)%target%catalog_index
             if (self%catalog%horizontal_sources(catalog_index) == data_source_fabm) then
                read_index = check_state_data(ivar)%index
-               _HORIZONTAL_UNPACK_TO_GLOBAL_(self%cache_hz%read_hz, read_index, self%catalog%horizontal(catalog_index)%p, self%cache_hz, state_variables(ivar)%missing_value)
+               _HORIZONTAL_UNPACK_TO_GLOBAL_SKIPMASK_(self%cache_hz%read_hz, read_index, self%catalog%horizontal(catalog_index)%p, self%cache_hz)
             end if
          end do
       end if
@@ -2446,7 +2455,11 @@ contains
             _VERTICAL_STOP_ = self%domain%stop(_FABM_DEPTH_DIMENSION_INDEX_)
 #endif
          case (source_global)
-            call process_global(task, self%catalog  _POSTARG_LOCATION_RANGE_, self%time)
+            if (self%has_time) then
+               call process_global(task, self%catalog  _POSTARG_LOCATION_RANGE_, self%time)
+            else
+               call process_global(task, self%catalog  _POSTARG_LOCATION_RANGE_)
+            end if
          end select
          task => task%next
       end do
@@ -2491,7 +2504,8 @@ contains
       kstop__ = self%domain%stop(3)
 #  endif
 
-      if (present(t)) self%time = t
+      self%has_time = present(t)
+      if (self%has_time) self%time = t
       call self%process(self%prepare_inputs_job)
    end subroutine prepare_inputs1
 

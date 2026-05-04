@@ -78,11 +78,17 @@ module fabm_types
 
    public rk, rke
 
+   ! Domain constants use a bit-flag scheme.
+   ! domain_horizontal (bit 3) acts as a "horizontal subtype" marker:
+   !   domain_bottom  = domain_horizontal | 1  (9)  - bottom  interface, subset of horizontal
+   !   domain_surface = domain_horizontal | 2  (10) - surface interface, subset of horizontal
+   ! Code that handles all horizontal-domain variables (including bottom and surface) therefore
+   ! tests: iand(variable%domain, domain_horizontal) /= 0
    integer, parameter, public :: domain_interior   = 4, &
                                  domain_horizontal = 8, &
                                  domain_scalar     = 16, &
-                                 domain_bottom     = 9, &
-                                 domain_surface    = 10
+                                 domain_bottom     = 9, &   ! domain_horizontal | 1
+                                 domain_surface    = 10     ! domain_horizontal | 2
 
    integer, parameter, public :: source_unknown                  =  0, &
                                  source_do                       =  1, &
@@ -341,8 +347,8 @@ module fabm_types
    end type
 
    type type_dependency_flag
-      integer ::source = source_unknown
-      integer ::flag   = dependency_flag_none
+      integer :: source = source_unknown
+      integer :: flag   = dependency_flag_none
    end type
 
    ! --------------------------------------------------------------------------
@@ -1093,6 +1099,7 @@ contains
       model%parent => self
       if (.not. associated(model%parameters%parent)) call self%parameters%attach_child(model%parameters, trim(model%name), display=display_hidden)
       if (.not. associated(model%couplings%parent)) call self%couplings%attach_child(model%couplings, trim(model%name), display=display_hidden)
+      if (.not. associated(model%initialization%parent)) call self%initialization%attach_child(model%initialization, trim(model%name), display=display_hidden)
       call self%children%append(model)
       call model%initialize(-1)
       model%rdt__ = 1._rk / model%dt
@@ -2680,7 +2687,7 @@ contains
          default, display=get_effective_display(display, self%user_created))
    end subroutine get_logical_parameter
 
-   recursive subroutine get_string_parameter(self, value, name, units, long_name, default, display)
+   subroutine get_string_parameter(self, value, name, units, long_name, default, display)
       class (type_base_model), intent(inout), target :: self
       character(len=*),        intent(inout)         :: value
       character(len=*),        intent(in)            :: name

@@ -147,6 +147,20 @@ program test_host
 #  endif
 #endif
 
+#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
+! Inner loop over depth with a non-constant bottom index. Skip everything below bottom
+#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
+#    define _BEGIN_OUTER_INTERIOR_LOOP_PLUS_ _BEGIN_OUTER_INTERIOR_LOOP_;_START_ = bottom_index _INDEX_HORIZONTAL_LOCATION_;if (_START_ <= _STOP_) then
+#    define _END_OUTER_INTERIOR_LOOP_PLUS_ end if;_START_ = domain_start(_FABM_VECTORIZED_DIMENSION_INDEX_);_END_OUTER_INTERIOR_LOOP_
+#  else
+#    define _BEGIN_OUTER_INTERIOR_LOOP_PLUS_ _BEGIN_OUTER_INTERIOR_LOOP_;_STOP_ = bottom_index _INDEX_HORIZONTAL_LOCATION_;if (_START_ <= _STOP_) then
+#    define _END_OUTER_INTERIOR_LOOP_PLUS_ end if;_STOP_ = domain_stop(_FABM_VECTORIZED_DIMENSION_INDEX_);_END_OUTER_INTERIOR_LOOP_
+#  endif
+#else
+#  define _BEGIN_OUTER_INTERIOR_LOOP_PLUS_ _BEGIN_OUTER_INTERIOR_LOOP_
+#  define _END_OUTER_INTERIOR_LOOP_PLUS_ _END_OUTER_INTERIOR_LOOP_
+#endif
+
 #ifdef _INTERIOR_IS_VECTORIZED_
    integer :: _START_, _STOP_
 #endif
@@ -213,6 +227,18 @@ program test_host
    logical :: custom_path = .false.
    real(rke) :: dt = 1._rke
 
+   type type_input
+      type (type_fabm_interior_variable_id)                :: interior_id
+      type (type_fabm_horizontal_variable_id)              :: horizontal_id
+      type (type_fabm_scalar_variable_id)                  :: scalar_id
+      real(rke), allocatable _DIMENSION_GLOBAL_            :: interior_data
+      real(rke), allocatable _DIMENSION_GLOBAL_HORIZONTAL_ :: horizontal_data
+      real(rke)                                            :: scalar_data
+      type (type_input), pointer                           :: next => null()
+   end type
+   type (type_input), pointer :: first_input => null()
+   type (type_input), pointer :: next_input
+
 #if _FABM_DIMENSION_COUNT_>0
    i__ = 50
 #endif
@@ -222,6 +248,8 @@ program test_host
 #if _FABM_DIMENSION_COUNT_>2
    k__ = 45
 #endif
+
+   allocate(type_test_driver::driver)
 
    call start_test('fabm_get_version')
    call fabm_get_version(version)
@@ -337,8 +365,6 @@ program test_host
 
    allocate(tmp _INDEX_LOCATION_)
    allocate(tmp_hz _INDEX_HORIZONTAL_LOCATION_)
-
-   allocate(type_test_driver::driver)
 
    call start_test('fabm_initialize_library')
    call fabm_initialize_library()
@@ -512,13 +538,55 @@ program test_host
       call simulate(ntest)
    end select
 
+   deallocate(flux)
+   deallocate(sms_sf)
+   deallocate(sms_bt)
+   deallocate(total_hz)
+
+   deallocate(dy)
+   deallocate(w)
+   deallocate(total_int)
+
+   select case (mode)
+   case (1)
+       deallocate(depth)
+       deallocate(temperature)
+       deallocate(wind_speed)
+   end select
+
+   deallocate(interior_state)
+   deallocate(surface_state)
+   deallocate(bottom_state)
+
+#if defined(_FABM_DEPTH_DIMENSION_INDEX_)&&_FABM_BOTTOM_INDEX_==-1
+   deallocate(bottom_index)
+#endif
+
+#ifdef _HAS_MASK_
+   deallocate(mask_hz)
+#  ifndef _FABM_HORIZONTAL_MASK_
+   deallocate(mask)
+#  endif
+#endif
+
    call start_test('finalize')
    call model%finalize()
    call report_test_result()
 
    deallocate(model)
 
+   deallocate(tmp)
+   deallocate(tmp_hz)
+
    call fabm_finalize_library()
+
+   deallocate(driver)
+
+   do while (associated(first_input))
+      next_input => first_input%next
+      deallocate(first_input)
+      first_input => next_input
+   end do
 
 contains
 
@@ -587,14 +655,6 @@ contains
       type (type_yaml_key_value_pair), pointer :: yaml_pair
       real(rke) :: value
       logical :: success
-      type type_input
-         type (type_fabm_interior_variable_id)                :: interior_id
-         type (type_fabm_horizontal_variable_id)              :: horizontal_id
-         type (type_fabm_scalar_variable_id)                  :: scalar_id
-         real(rke), allocatable _DIMENSION_GLOBAL_            :: interior_data
-         real(rke), allocatable _DIMENSION_GLOBAL_HORIZONTAL_ :: horizontal_data
-         real(rke)                                            :: scalar_data
-      end type
       type (type_input), pointer :: input
 
       yaml_root => yaml_parse('environment.yaml', get_free_unit(), yaml_error)
@@ -615,6 +675,8 @@ contains
                      stop 2
                   end if
                   allocate(input)
+                  input%next => first_input
+                  first_input => input
                   input%interior_id = model%get_interior_variable_id(trim(yaml_pair%key))
                   if (model%is_variable_used(input%interior_id)) then
                       allocate(input%interior_data _INDEX_LOCATION_)
@@ -800,44 +862,16 @@ contains
    end subroutine configure_mask
 
    subroutine count_active_points()
-      logical :: active
       integer :: i, nhz, nhz_active, nint, nint_active
-
-      active = .true.
 
       interior_count = 0
       _BEGIN_GLOBAL_LOOP_
-         active = .true.
-
-         ! Mark as inactive if the point is masked
-#ifdef _HAS_MASK_
-#  ifdef _FABM_HORIZONTAL_MASK_
-         active = _IS_UNMASKED_(mask_hz _INDEX_HORIZONTAL_LOCATION_)
-#  else
-         active = _IS_UNMASKED_(mask _INDEX_LOCATION_)
-#  endif
-#endif
-
-         ! Mark as inactive if the point lies below the bottom
-         ! This is not caught by the mask check above if (a) there is not mask,
-         ! or (b) the mask is horizontal only
-#if _FABM_BOTTOM_INDEX_==-1
-#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
-         active = active .and. _ITERATOR_ >= bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  else
-         active = active .and. _ITERATOR_ <= bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  endif
-#endif
-
-         if (active) interior_count = interior_count + 1
+         if (is_unmasked_interior(_LOCATION_)) interior_count = interior_count + 1
       _END_GLOBAL_LOOP_
 
       horizontal_count = 0
       _BEGIN_GLOBAL_HORIZONTAL_LOOP_
-#ifdef _HAS_MASK_
-         active = _IS_UNMASKED_(mask_hz _INDEX_HORIZONTAL_LOCATION_)
-#endif
-         if (active) horizontal_count = horizontal_count + 1
+         if (is_unmasked_horizontal(_ARG_HORIZONTAL_LOCATION_)) horizontal_count = horizontal_count + 1
       _END_GLOBAL_HORIZONTAL_LOOP_
 
       nint = 1
@@ -880,9 +914,9 @@ contains
       call configure_mask(.not. no_mask)
 
       call start_test('initialize_interior_state')
-      _BEGIN_OUTER_INTERIOR_LOOP_
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          call model%initialize_interior_state(_ARG_INTERIOR_IN_)
-      _END_OUTER_INTERIOR_LOOP_
+      _END_OUTER_INTERIOR_LOOP_PLUS_
       call report_test_result()
 
       call start_test('initialize_bottom_state')
@@ -916,40 +950,16 @@ contains
             call model%get_surface_sources(_PREARG_HORIZONTAL_IN_ flux, sms_sf)
          _END_OUTER_HORIZONTAL_LOOP_
 
-         _BEGIN_OUTER_INTERIOR_LOOP_
+         _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
             dy = 0
-#if _FABM_BOTTOM_INDEX_==-1 && !defined(_HAS_MASK_) && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         ! We are looping over depth, but as we have a non-constant bottom index (yet no mask), we need to skip everything below bottom
-#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
-            _START_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  else
-            _STOP_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  endif
-#endif
             call model%get_interior_sources(_PREARG_INTERIOR_IN_ dy _INTERIOR_SLICE_RANGE_PLUS_1_)
-         _END_OUTER_INTERIOR_LOOP_
-#if _FABM_BOTTOM_INDEX_==-1 && !defined(_HAS_MASK_) && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         _START_ = domain_start(_FABM_VECTORIZED_DIMENSION_INDEX_)
-         _STOP_ = domain_stop(_FABM_VECTORIZED_DIMENSION_INDEX_)
-#  endif
+         _END_OUTER_INTERIOR_LOOP_PLUS_
 
          call model%finalize_outputs()
 
-         _BEGIN_OUTER_INTERIOR_LOOP_
-#if _FABM_BOTTOM_INDEX_==-1 && !defined(_HAS_MASK_) && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         ! We are looping over depth, but as we have a non-constant bottom index (yet no mask), we need to skip everything below bottom
-#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
-            _START_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  else
-            _STOP_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  endif
-#endif
+         _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
             call model%get_vertical_movement(_PREARG_INTERIOR_IN_ w _INTERIOR_SLICE_RANGE_PLUS_1_)
-         _END_OUTER_INTERIOR_LOOP_
-#if _FABM_BOTTOM_INDEX_==-1 && !defined(_HAS_MASK_) && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         _START_ = domain_start(_FABM_VECTORIZED_DIMENSION_INDEX_)
-         _STOP_ = domain_stop(_FABM_VECTORIZED_DIMENSION_INDEX_)
-#  endif
+         _END_OUTER_INTERIOR_LOOP_PLUS_
 
          _BEGIN_OUTER_HORIZONTAL_LOOP_
             call model%check_bottom_state(_PREARG_HORIZONTAL_IN_ repair, valid)
@@ -959,9 +969,9 @@ contains
             call model%check_surface_state(_PREARG_HORIZONTAL_IN_ repair, valid)
          _END_OUTER_HORIZONTAL_LOOP_
 
-         _BEGIN_OUTER_INTERIOR_LOOP_
+         _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
             call model%check_interior_state(_PREARG_INTERIOR_IN_ repair, valid)
-         _END_OUTER_INTERIOR_LOOP_
+         _END_OUTER_INTERIOR_LOOP_PLUS_
 
          if (mod(i, ireport) == 0) write (*,'(i0,a)') int(100*i/real(n, rke)), ' % complete'
       end do
@@ -989,10 +999,18 @@ contains
       ! Initialize all state variables
       ! ======================================================================
 
+#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
+      ! If we skip points below the bottom, we need to initialize them to the missing value, so check_interior will not fail on those points
+      do ivar = 1, size(model%interior_state_variables)
+         interior_state(_PREARG_LOCATION_DIMENSIONS_ ivar) = model%interior_state_variables(ivar)%missing_value
+      end do
+#endif
+
       call start_test('initialize_interior_state')
-      _BEGIN_OUTER_INTERIOR_LOOP_
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          call model%initialize_interior_state(_ARG_INTERIOR_IN_)
-      _END_OUTER_INTERIOR_LOOP_
+      _END_OUTER_INTERIOR_LOOP_PLUS_
+
       do ivar = 1, size(model%interior_state_variables)
          call check_interior(interior_state(_PREARG_LOCATION_DIMENSIONS_ ivar), &
             model%interior_state_variables(ivar)%missing_value, ivar+interior_state_offset+1._rke)
@@ -1081,33 +1099,13 @@ contains
 
       call start_test('get_interior_sources')
       interior_loop_count = 0
-      _BEGIN_OUTER_INTERIOR_LOOP_
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          dy = 0
-#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         ! We are looping over depth, but as we have a non-constant bottom index (yet no mask), we need to skip everything below bottom
-#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
-         _START_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  else
-         _STOP_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  endif
-         if (_START_ <= _STOP_) then
-#endif
-
          call model%get_interior_sources(_PREARG_INTERIOR_IN_ dy _INTERIOR_SLICE_RANGE_PLUS_1_)
          do ivar = 1, size(model%interior_state_variables)
             call check_interior_slice_plus_1(dy _INTERIOR_SLICE_RANGE_PLUS_1_, ivar, 0.0_rke, -real(ivar + interior_state_offset, rke) _POSTARG_INTERIOR_IN_)
          end do
-
-#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         end if
-#endif
-      _END_OUTER_INTERIOR_LOOP_
-
-      ! If we varied start or stop indices of the inner loop, reset them now
-#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-      _START_ = domain_start(_FABM_VECTORIZED_DIMENSION_INDEX_)
-      _STOP_ = domain_stop(_FABM_VECTORIZED_DIMENSION_INDEX_)
-#endif
+      _END_OUTER_INTERIOR_LOOP_PLUS_
 
       call assert(interior_loop_count == interior_count, 'get_interior_sources', &
          'call count does not match number of (unmasked) interior points')
@@ -1246,17 +1244,7 @@ contains
 
       call start_test('get_vertical_movement')
       vertical_movement_loop_count = 0
-      _BEGIN_OUTER_INTERIOR_LOOP_
-#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         ! We are looping over depth, but as we have a non-constant bottom index (yet no mask), we need to skip everything below bottom
-#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
-         _START_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  else
-         _STOP_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  endif
-         if (_START_ <= _STOP_) then
-#endif
-
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          call model%get_vertical_movement(_PREARG_INTERIOR_IN_ w _INTERIOR_SLICE_RANGE_PLUS_1_)
          do ivar = 1, size(model%interior_state_variables)
             if (mod(ivar, 2) == 0) then
@@ -1267,18 +1255,7 @@ contains
                   _POSTARG_INTERIOR_IN_)
             end if
          end do
-
-#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         end if
-#endif
-
-      _END_OUTER_INTERIOR_LOOP_
-
-      ! If we varied start or stop indices of the inner loop, reset them now
-#if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-      _START_ = domain_start(_FABM_VECTORIZED_DIMENSION_INDEX_)
-      _STOP_ = domain_stop(_FABM_VECTORIZED_DIMENSION_INDEX_)
-#endif
+      _END_OUTER_INTERIOR_LOOP_PLUS_
 
       call assert(vertical_movement_loop_count == interior_count, 'get_vertical_movement', &
          'call count does not match number of (unmasked) interior points')
@@ -1289,27 +1266,14 @@ contains
       ! ======================================================================
 
       call start_test('get_interior_conserved_quantities')
-      _BEGIN_OUTER_INTERIOR_LOOP_
-#if _FABM_BOTTOM_INDEX_==-1 && !defined(_HAS_MASK_) && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-         ! We are looping over depth, but as we have a non-constant bottom index (yet no mask), we need to skip everything below bottom
-#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
-         _START_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  else
-         _STOP_ = bottom_index _INDEX_HORIZONTAL_LOCATION_
-#  endif
-#endif
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          call model%get_interior_conserved_quantities(_PREARG_INTERIOR_IN_ total_int _INTERIOR_SLICE_RANGE_PLUS_1_)
          do ivar = 1, size(model%conserved_quantities)
             call check_interior_slice_plus_1(total_int _INTERIOR_SLICE_RANGE_PLUS_1_, ivar, model%conserved_quantities(ivar)%missing_value, &
                (interior_state_offset + 0.5_rke * (test_model%nstate + 1)) * test_model%nstate _POSTARG_INTERIOR_IN_)
          end do
-      _END_OUTER_INTERIOR_LOOP_
+      _END_OUTER_INTERIOR_LOOP_PLUS_
 
-      ! If we varied start or stop indices of the inner loop, reset them now
-#if _FABM_BOTTOM_INDEX_==-1 && !defined(_HAS_MASK_) && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
-      _START_ = domain_start(_FABM_VECTORIZED_DIMENSION_INDEX_)
-      _STOP_ = domain_stop(_FABM_VECTORIZED_DIMENSION_INDEX_)
-#  endif
       call report_test_result()
 
       call start_test('get_horizontal_conserved_quantities')
@@ -1328,10 +1292,10 @@ contains
       ! ======================================================================
 
       call start_test('check_interior_state')
-      _BEGIN_OUTER_INTERIOR_LOOP_
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          call model%check_interior_state(_PREARG_INTERIOR_IN_  .true., valid)
          if (.not. valid) call driver%fatal_error('check_interior_state', 'state is reported as invalid')
-      _END_OUTER_INTERIOR_LOOP_
+      _END_OUTER_INTERIOR_LOOP_PLUS_
       call report_test_result()
 
       call start_test('check_surface_state')
@@ -1368,7 +1332,7 @@ contains
 
       any_unmasked = .true.
       call start_test('check_interior_state < min')
-      _BEGIN_OUTER_INTERIOR_LOOP_
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          call model%check_interior_state(_PREARG_INTERIOR_IN_ .true., valid)
 #ifdef _HAS_MASK_
 #  ifdef _FABM_HORIZONTAL_MASK_
@@ -1382,7 +1346,7 @@ contains
 #  endif
 #endif
          call assert(valid .neqv. any_unmasked, 'check_interior_state', 'invalid result')
-      _END_OUTER_INTERIOR_LOOP_
+      _END_OUTER_INTERIOR_LOOP_PLUS_
       do ivar = 1, size(model%interior_state_variables)
          call check_interior(interior_state(_PREARG_LOCATION_DIMENSIONS_ ivar), &
             model%interior_state_variables(ivar)%missing_value, model%interior_state_variables(ivar)%minimum)
@@ -1444,7 +1408,7 @@ contains
       end do
 
       call start_test('check_interior_state > max')
-      _BEGIN_OUTER_INTERIOR_LOOP_
+      _BEGIN_OUTER_INTERIOR_LOOP_PLUS_
          call model%check_interior_state(_PREARG_INTERIOR_IN_ .true., valid)
 #ifdef _HAS_MASK_
 #  ifdef _FABM_HORIZONTAL_MASK_
@@ -1458,7 +1422,7 @@ contains
 #  endif
 #endif
          call assert(valid .neqv. any_unmasked, 'check_interior_state', 'invalid result')
-      _END_OUTER_INTERIOR_LOOP_
+      _END_OUTER_INTERIOR_LOOP_PLUS_
       do ivar = 1, size(model%interior_state_variables)
          call check_interior(interior_state(_PREARG_LOCATION_DIMENSIONS_ ivar), &
             model%interior_state_variables(ivar)%missing_value, model%interior_state_variables(ivar)%maximum)
@@ -1534,24 +1498,19 @@ contains
    subroutine apply_mask_3d(dat,missing_value)
       real(rke) _DIMENSION_GLOBAL_,intent(inout) :: dat
       real(rke),                   intent(in)    :: missing_value
-#ifdef _HAS_MASK_
-#  ifdef _FABM_HORIZONTAL_MASK_
-      integer :: j__
-      _BEGIN_GLOBAL_HORIZONTAL_LOOP_
-         if (.not. _IS_UNMASKED_(mask_hz _INDEX_HORIZONTAL_LOCATION_)) dat _INDEX_GLOBAL_VERTICAL_(:) = missing_value
-      _END_GLOBAL_HORIZONTAL_LOOP_
-#  else
-      where (.not._IS_UNMASKED_(mask)) dat = missing_value
-#  endif
-#endif
+
+      _BEGIN_GLOBAL_LOOP_
+         if (.not. is_unmasked_interior(_LOCATION_)) dat _INDEX_LOCATION_ = missing_value
+      _END_GLOBAL_LOOP_
    end subroutine
 
    subroutine apply_mask_2d(dat, missing_value)
       real(rke) _DIMENSION_GLOBAL_HORIZONTAL_,intent(inout) :: dat
       real(rke),                              intent(in)    :: missing_value
-#ifdef _HAS_MASK_
-      where (.not. _IS_UNMASKED_(mask_hz)) dat = missing_value
-#endif
+
+      _BEGIN_GLOBAL_HORIZONTAL_LOOP_
+         if (.not. is_unmasked_horizontal(_ARG_HORIZONTAL_LOCATION_)) dat _INDEX_HORIZONTAL_LOCATION_ = missing_value
+      _END_GLOBAL_HORIZONTAL_LOOP_
    end subroutine
 
    subroutine check_interior_slice_plus_1(dat, index, required_masked_value, required_value _POSTARG_INTERIOR_IN_)
@@ -1652,28 +1611,45 @@ contains
 #endif
    end subroutine check_horizontal_slice
 
+   function is_unmasked_interior(_LOCATION_) result(unmasked)
+      _DECLARE_LOCATION_
+      logical :: unmasked
+
+#ifdef _HAS_MASK_
+#  ifdef _FABM_HORIZONTAL_MASK_
+      unmasked = _IS_UNMASKED_(mask_hz _INDEX_HORIZONTAL_LOCATION_)
+#    if _FABM_BOTTOM_INDEX_==-1 && _FABM_VECTORIZED_DIMENSION_INDEX_==_FABM_DEPTH_DIMENSION_INDEX_ && defined(_FABM_DEPTH_DIMENSION_INDEX_)
+#      ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
+      unmasked = unmasked .and. (_ITERATOR_ >= bottom_index _INDEX_HORIZONTAL_LOCATION_)
+#      else
+      unmasked = unmasked .and. (_ITERATOR_ <= bottom_index _INDEX_HORIZONTAL_LOCATION_)
+#      endif
+#    endif
+#  else
+      unmasked = _IS_UNMASKED_(mask _INDEX_LOCATION_)
+#  endif
+#else
+      unmasked = .true.
+#endif
+   end function
+
+   function is_unmasked_horizontal(_ARG_HORIZONTAL_LOCATION_) result(unmasked)
+      _DECLARE_HORIZONTAL_LOCATION_
+      logical :: unmasked
+
+#ifdef _HAS_MASK_
+      unmasked = _IS_UNMASKED_(mask_hz _INDEX_HORIZONTAL_LOCATION_)
+#else
+      unmasked = .true.
+#endif
+   end function
+
    subroutine check_interior(dat, required_masked_value, required_value)
       real(rke) _DIMENSION_GLOBAL_, intent(in) :: dat
       real(rke),                    intent(in) :: required_masked_value, required_value
-      logical :: unmasked
 
-      unmasked = .true.
       _BEGIN_GLOBAL_LOOP_
-#ifdef _HAS_MASK_
-#  ifdef _FABM_HORIZONTAL_MASK_
-         unmasked = _IS_UNMASKED_(mask_hz _INDEX_HORIZONTAL_LOCATION_)
-#  else
-         unmasked = _IS_UNMASKED_(mask _INDEX_LOCATION_)
-#  endif
-#endif
-#if _FABM_BOTTOM_INDEX_==-1
-#  ifdef _FABM_VERTICAL_BOTTOM_TO_SURFACE_
-         if (_ITERATOR_ < bottom_index _INDEX_HORIZONTAL_LOCATION_) cycle
-#  else
-         if (_ITERATOR_ > bottom_index _INDEX_HORIZONTAL_LOCATION_) cycle
-#  endif
-#endif
-         if (unmasked) then
+         if (is_unmasked_interior(_LOCATION_)) then
             call assert_equal(dat _INDEX_LOCATION_, required_value, 'check_interior', 'one or more non-masked cells do not have the value required.')
          else
             call assert_equal(dat _INDEX_LOCATION_, required_masked_value, 'check_interior', 'one or more masked cells do not have the value required.')
@@ -1684,14 +1660,9 @@ contains
    subroutine check_horizontal(dat, required_masked_value, required_value)
       real(rke) _DIMENSION_GLOBAL_HORIZONTAL_, intent(in) :: dat
       real(rke),                               intent(in) :: required_masked_value, required_value
-      logical :: unmasked
 
-      unmasked = .true.
       _BEGIN_GLOBAL_HORIZONTAL_LOOP_
-#ifdef _HAS_MASK_
-         unmasked = _IS_UNMASKED_(mask_hz _INDEX_HORIZONTAL_LOCATION_)
-#endif
-         if (unmasked) then
+         if (is_unmasked_horizontal(_ARG_HORIZONTAL_LOCATION_)) then
             call assert_equal(dat _INDEX_HORIZONTAL_LOCATION_, required_value, 'check_horizontal', 'one or more non-masked cells do not have the value required.')
          else
             call assert_equal(dat _INDEX_HORIZONTAL_LOCATION_, required_masked_value, 'check_horizontal', 'one or more masked cells do not have the value required.')
